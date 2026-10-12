@@ -24,3 +24,5 @@ tuning_logs/
 *.log
 __pycache__/
 .continue/
+Minor.analysis.tar
+Minor.final_experiments.tar

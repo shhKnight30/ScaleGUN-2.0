@@ -369,6 +369,14 @@ def main():
                         per_param_grad = noise_scale / math.sqrt(p.numel())
                         p.data.add_(torch.randn_like(p) * per_param_grad)
 
+            # FIX: Re-apply PGD after noise injection.
+            # Noise can push individual parameter tensors outside the ||w||₂ ≤ C
+            # ball required by CertDNN Theorem 3.4.  Without this projection the
+            # PGD constraint is violated post-noise, invalidating the certification
+            # guarantee.  This matches CertDNN Algorithm 1 which adds noise then
+            # implicitly assumes the output is still in the feasible set.
+            apply_pgd_projection(model, pgd_c=pgd_c, mode=pgd_mode)
+
         # ═══════════════════════════════════════════════════
         # 4. AGU FIX: Pass the EXACT affected nodes to NIM
         # ═══════════════════════════════════════════════════

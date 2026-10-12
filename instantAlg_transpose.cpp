@@ -258,8 +258,9 @@ namespace propagation
             tmp_result = result;
         vector<thread> threads;
         // update graph, delete the edges in edgepairs
-        bool *isAffectNodes = new bool[num_nodes];
-        memset(isAffectNodes, 0, sizeof(bool) * num_nodes);
+        // bool *isAffectNodes = new bool[num_nodes];
+        // memset(isAffectNodes, 0, sizeof(bool) * num_nodes);
+        vector<bool> isAffectNodes(num_nodes,false);
         vector<uint> affectNodes;
         vector<vector<uint>> affectNeighbors(num_nodes);
         for (auto &edgepair : edgepairs)
@@ -377,8 +378,7 @@ namespace propagation
             tmp_result = result;
         vector<thread> threads;
         // update graph, delete the edges in edgepairs
-        bool *isAffectNodes = new bool[num_nodes];
-        memset(isAffectNodes, 0, sizeof(bool) * num_nodes);
+        vector<bool> isAffectNodes(num_nodes,false);
         vector<uint> affectNodes;
         vector<vector<uint>> affectNeighbors(num_nodes);
         for (auto &node : nodes)

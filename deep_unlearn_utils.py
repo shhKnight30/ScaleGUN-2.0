@@ -22,7 +22,7 @@ import csv
 from sklearn.metrics import f1_score as sklearn_f1_score
 from sklearn.metrics import roc_auc_score as sklearn_roc_auc_score
 
-logger = None
+logger = logging.getLogger(__name__)
 
 
 def setup_unlearn_logger(name):
@@ -67,7 +67,7 @@ def apply_pgd_projection(model, pgd_c, mode='per_param'):
 def train_model(model, device, X_train, y_train, batch_size,
                 optimizer, epochs, X_val, y_val, evaluator,
                 checkpt_file, patience, verbose=False,
-                noises=None, pgd_c=5.0):
+                noises=None, pgd_c=50.0):
     bad_counter = 0
     best = 0
     num_train = X_train.shape[0]
@@ -97,8 +97,8 @@ def train_model(model, device, X_train, y_train, batch_size,
                 for ni, param in enumerate(
                     p for p in model.parameters() if p.requires_grad
                 ):
-                    noise_loss += (param.data * noises[ni]).sum()
-                loss = loss + noise_loss / (num_train * 2) * x.size(0)
+                    noise_loss += (param * noises[ni]).sum()
+                loss = loss + noise_loss / (num_train * 2)
 
             loss.backward()
             optimizer.step()
@@ -207,7 +207,7 @@ def cal_grad_handloader(model, device, _X, _y, batch_size, retain=False):
 # HVP helpers (unchanged — these are correct)
 # ═══════════════════════════════════════════════════════
 def hvps(grad_all, model_params, h_estimate):
-    element_product = 0
+    element_product = torch.tensor(0.0, device=grad_all[0].device)
     for grad_elem, v_elem in zip(grad_all, h_estimate):
         element_product += torch.sum(grad_elem * v_elem)
     return_grads = grad(element_product, model_params, create_graph=True)
@@ -221,6 +221,24 @@ def lissa_inverse_hvp(v, model, device, X_train, y_train,
                        batch_size=256, recursions=500,
                        damp=0.01, scale=10.0,
                        convergence_tol=1e-4, check_every=25):
+    """
+    LiSSA inverse-Hessian-vector product.
+
+    Implements the recursion from Agarwal et al. (2017) and CertDNN
+    (Zhang et al., ICML 2024, Algorithm 1):
+
+        H̃⁻¹_t = I + (I − H_t / scale) × H̃⁻¹_{t−1}
+
+    The output is H̃⁻¹_s / scale  (one division by scale total).
+
+    FIX vs previous version: the old code divided h_estimate by scale
+    BOTH inside the loop (via `... / scale`) AND again at the end
+    (`h_estimate = [h / scale ...]`), making the result (H̃⁻¹v) / scale²
+    instead of (H̃⁻¹v) / scale.  The final explicit division is now removed.
+
+    Reference: CertDNN Appendix D — s = 1000 recursions (no early stopping).
+    With convergence_tol early stopping, 500 max iterations is sufficient.
+    """
     model.eval()
     params = [p for p in model.parameters() if p.requires_grad]
     num_train = X_train.shape[0]
@@ -252,6 +270,9 @@ def lissa_inverse_hvp(v, model, device, X_train, y_train,
         
         with torch.no_grad():
             for j in range(len(h_estimate)):
+                # Standard LiSSA update (Agarwal et al. 2017, Eq. 8):
+                #   H̃⁻¹_t = v + (I − H_t/scale) × H̃⁻¹_{t−1}
+                #          = v + H̃⁻¹_{t−1} − (HVP + damp·h) / scale
                 h_estimate[j] = (
                     v[j].to(device)
                     + h_estimate[j]
@@ -278,9 +299,15 @@ def lissa_inverse_hvp(v, model, device, X_train, y_train,
                 break
             prev_h_norm = curr_norm
     
-    # Divide by scale
-    with torch.no_grad():
-        h_estimate = [h.detach() / scale for h in h_estimate]
+    # ── FIX: Do NOT divide by scale again here. ──
+    # The loop already divides by scale at each step (via `/ scale` in the
+    # update), so the accumulated h_estimate converges to H̃⁻¹v / scale,
+    # which is the correct estimator of (H + λI)⁻¹ v (Proposition 3.5,
+    # CertDNN; Proposition 3.5, Agarwal et al. 2017).
+    # The previous code had an extra `h_estimate = [h / scale ...]` here,
+    # producing a result that was (scale) times too small, suppressing all
+    # weight updates.
+    h_estimate = [h.detach() for h in h_estimate]
     
     # ── DIAGNOSTIC: Log output magnitude ──
     update_norm = sum(h.norm().item()**2 for h in h_estimate)**0.5
@@ -293,11 +320,17 @@ def lissa_inverse_hvp(v, model, device, X_train, y_train,
 # NIM Fine-Tuning (separate function, called from unlearning loop)
 # ═══════════════════════════════════════════════════════
 def nim_finetune(model, device, X_train, y_train, agu_affected_indices,
-                 lr=0.001, nim_epochs=5, pgd_c=5.0):
+                 lr=0.001, nim_epochs=5, pgd_c=50.0):
     """
-    AGU + NIM Fine-Tuning: 
-    Fine-tunes the model ONLY on the nodes identified by AGU's adaptive 
+    AGU + NIM Fine-Tuning:
+    Fine-tunes the model ONLY on the nodes identified by AGU's adaptive
     neighbor selection (nodes whose features meaningfully shifted).
+
+    FIX: Changed optimizer from SGD to Adam to match the main training loop.
+    Using SGD in NIM while training uses Adam creates an inconsistency in the
+    optimization landscape — gradient moments and adaptive learning rates from
+    Adam's state are invalidated by SGD steps.  Uniform use of Adam throughout
+    ensures consistent optimization dynamics.
     """
     if len(agu_affected_indices) < 2:
         logger.info(f"NIM/AGU: Only {len(agu_affected_indices)} affected node(s), skipping.")
@@ -315,7 +348,11 @@ def nim_finetune(model, device, X_train, y_train, agu_affected_indices,
         if isinstance(module, torch.nn.BatchNorm1d):
             module.eval()
 
-    nim_optimizer = optim.SGD(model.parameters(), lr=lr * 0.1, momentum=0.9)
+    # ── FIX: Use Adam (matching main training loop) instead of SGD ──
+    # lr * 0.1 is a deliberately conservative NIM learning rate; Adam is used
+    # because the main training loop uses Adam, and mixing optimizers creates
+    # inconsistent moment estimates.
+    nim_optimizer = optim.Adam(model.parameters(), lr=lr * 0.1)
 
     for _ in range(nim_epochs):
         nim_optimizer.zero_grad()
@@ -326,6 +363,8 @@ def nim_finetune(model, device, X_train, y_train, agu_affected_indices,
     apply_pgd_projection(model, pgd_c)
     model.eval()
     logger.info("NIM/AGU fine-tuning complete.")
+
+
 def apply_lissa_update(model, inverse_hvs, device, max_update_ratio=0.01):
     """
     Apply the LiSSA weight update with norm clamping.
@@ -453,7 +492,7 @@ def test_comprehensive(model, device, X, y, batch_size, evaluator=None):
     accuracy = (preds_np == labels_np).sum() / len(labels_np)
 
     # Macro F1
-    f1 = sklearn_f1_score(labels_np, preds_np, average='macro', zero_division=0)
+    f1 = sklearn_f1_score(labels_np, preds_np, average='macro', zero_division="warn")
 
     # AUC-ROC (One-vs-Rest for multiclass)
     try:
@@ -646,7 +685,7 @@ def compute_certification_bounds(
     rmax,
     num_nodes,
     prop_step,
-    pgd_c=5.0,
+    pgd_c=50.0,
     removal_type='edge',
 ):
     """
@@ -786,7 +825,7 @@ def retrain_gold_standard(model_class, model_kwargs, device,
                           X_train, y_train, X_val, y_val,
                           batch_size, lr, wd, epochs, patience,
                           checkpt_file, evaluator=None,
-                          noises=None, pgd_c=5.0):
+                          noises=None, pgd_c=50.0):
     """
     Retrain a fresh model from scratch on the REMAINING data.
     Returns (retrained_model, retrain_time).

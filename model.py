@@ -35,7 +35,7 @@ class ClassMLP(torch.nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lins[-1](x)
-        return torch.log_softmax(x, dim=-1)
+        return torch.log_softmax(x, dim=1)
         # return x
     
 class BinaryClassifier(nn.Module):

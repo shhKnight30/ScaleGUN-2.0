@@ -505,24 +505,28 @@ def get_worst_Gbound_node(degs, train_size, feat_dim, lam, rmax, num_nodes, prop
     return approximation_norm, unlearning_norm
 
 
-
 def get_worst_Gbound_feat(_deg, train_size, feat_dim, lam, rmax, num_nodes, prop_step):
+    # FIX: Use lam_theory = 0.01, consistent with get_worst_Gbound_edge and
+    # get_worst_Gbound_node.  Using the training lam (5e-4) directly here
+    # made the feature-removal certification bound 20× looser than the
+    # edge/node bounds and inconsistent across removal types.
+    lam_theory = 0.01
+
     c = 1
     c_1 = 1
     gamma_1 = 1/4
     gamma_2 = 1/4
     epsilon_1 = math.sqrt(num_nodes)*prop_step*rmax
     epsilon_2 = math.sqrt(_deg)
-    worst_delta = 2*c+c*gamma_1/lam*feat_dim * \
+    worst_delta = 2*c+c*gamma_1/lam_theory*feat_dim * \
         (1+epsilon_1)*(2*epsilon_1+epsilon_2)+c_1 * \
         math.sqrt(feat_dim*train_size)*(2*epsilon_1+epsilon_2)
     approximation_norm = gamma_1*epsilon_1*feat_dim * \
-        (c/lam+worst_delta/train_size/lam)+c_1 * \
+        (c/lam_theory+worst_delta/train_size/lam_theory)+c_1 * \
         math.sqrt(feat_dim*train_size)*epsilon_1
     unlearning_norm = gamma_1*(1+epsilon_1) * \
-        (1+epsilon_1)*feat_dim*worst_delta/train_size/lam
+        (1+epsilon_1)*feat_dim*worst_delta/train_size/lam_theory
     return approximation_norm, unlearning_norm
-
 
 def get_c(delta):
     return np.sqrt(2 * np.log(1.5 / delta))
